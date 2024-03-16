@@ -1,0 +1,72 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-east-1
+    IMAGE_REPO_NAME: directus-backend
+    AWS_ACCOUNT_ID: 301907805878
+    SECRET_BUCKET: s3://secrets-healthspan
+    ACCOUNT_ID_DEV: 301907805878
+    ACCOUNT_ID_PROD: 454745569753
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo Starting install phase... 
+      
+
+  pre_build:
+    commands:
+      - echo pre_build phase...
+      - apt-get update
+      - apt-get install jq
+      - curl -o /usr/local/bin/ecs-cli https://s3.amazonaws.com/amazon-ecs-cli/ecs-cli-linux-amd64-latest
+      - chmod +x /usr/local/bin/ecs-cli
+      - ecs-cli --version
+      - |
+        if  [ "$IMAGE_ID" = "NONE" ]; then
+          echo USING GIT COMMIT
+          export IMAGE_ID=$GIT_COMMIT
+        fi
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo $IMAGE_ID
+      - aws s3 cp $SECRET_BUCKET/$IMAGE_REPO_NAME/$ENVIRONMENT/ etc/infra/ --recursive --region $AWS_DEFAULT_REGION
+      - aws s3 cp $SECRET_BUCKET/$IMAGE_REPO_NAME/$ENVIRONMENT/.env . --region $AWS_DEFAULT_REGION   
+      - chmod +x etc/infra/parameters-env.sh
+      - . ./etc/infra/parameters-env.sh
+      - cd etc/infra/ecs
+      - |
+        if  [ "$ENVIRONMENT" == "dev" ]; then
+            AWS_ACCOUNT_ID=$ACCOUNT_ID_DEV;
+        else [ "$ENVIRONMENT" == "prod" ]; 
+            AWS_ACCOUNT_ID=$ACCOUNT_ID_PROD;
+            aws sts assume-role --role-arn arn:aws:iam::$AWS_ACCOUNT_ID:role/$ENVIRONMENT-account-cross-access --role-session-name cross-access > credentials.json
+            accesskey=$(jq '.Credentials.AccessKeyId' credentials.json | sed -e 's/^"//' -e 's/"$//')
+            secretkey=$(jq '.Credentials.SecretAccessKey' credentials.json | sed -e 's/^"//' -e 's/"$//')
+            sessiontoken=$(jq '.Credentials.SessionToken' credentials.json | sed -e 's/^"//' -e 's/"$//')
+            export AWS_ACCESS_KEY_ID=$accesskey
+            export AWS_SECRET_ACCESS_KEY=$secretkey
+            export AWS_SESSION_TOKEN=$sessiontoken
+        fi       
+      - aws ecr batch-get-image --registry-id $AWS_ACCOUNT_ID  --repository-name $IMAGE_REPO_NAME --image-ids imageTag=$IMAGE_ID > image_result.json
+      - RESULT=$(jq '.failures | length' image_result.json) && rm image_result.json
+      - echo $RESULT
+      - |
+        if  [ "$RESULT" -gt "0" ]; then
+          echo IMAGE NOT FOUND
+          aws codebuild stop-build
+        fi
+      - rm -rf app/docker-compose.yml; envsubst < "app/docker-compose-template.yml" > "app/docker-compose.yml"
+      - rm -rf app/ecs-params.yml; envsubst < "app/ecs-params-template.yml" > "app/ecs-params.yml"
+      - ecs-cli compose --verbose --file app/docker-compose.yml --project-name $APP_PROJECT_NAME  --ecs-params "app/ecs-params.yml" --region $REGION --cluster $ECS_CLUSTER service  up --launch-type $LAUNCH_TYPE  --deployment-max-percent $APP_DEPLOYMENT_MAX_PERCENT --deployment-min-healthy-percent $APP_DEPLOYMENT_MIN_HEALTHY_PERCENT --force-deployment  --timeout $TIMEOUT
+      - ecs-cli compose --verbose --file app/docker-compose.yml --project-name $APP_PROJECT_NAME  --ecs-params "app/ecs-params.yml" --region $REGION --cluster $ECS_CLUSTER service scale  --deployment-max-percent $APP_DEPLOYMENT_MAX_PERCENT --deployment-min-healthy-percent $APP_DEPLOYMENT_MIN_HEALTHY_PERCENT --timeout $TIMEOUT $APP_DESIRED_INSTANCE
+
+  post_build:
+    commands:
+      - echo Build completed on `date`

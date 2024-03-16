@@ -1,0 +1,25 @@
+version: 1
+task_definition:
+  ecs_network_mode: awsvpc
+  task_execution_role: ecsTaskExecutionRole
+  task_role_arn: ${CONTAINER_TASK_ROLE_ARN}
+  task_size:
+    mem_limit: ${APP_TASK_MEM_LIMIT}
+    cpu_limit: ${APP_TASK_CPU_LIMIT}
+  services:
+    ${APP_CONTAINER_NAME}:
+      essential: True
+      cpu_shares: ${APP_CONTAINER_CPU_SHARES}
+      mem_limit: ${APP_CONTAINER_MEM_LIMIT}
+      mem_reservation: ${APP_CONTAINER_MEM_RESERVATION}
+      
+run_params:
+  network_configuration:
+    awsvpc_configuration:
+      subnets:
+        - ${CONTAINER_SUBNET1}
+        - ${CONTAINER_SUBNET2}
+        - ${CONTAINER_SUBNET3}
+      security_groups:
+        - ${CONTAINER_SG}
+      assign_public_ip: DISABLED

@@ -1,0 +1,30 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-east-1
+    SECRET_BUCKET: s3://secrets-healthspan
+    IMAGE_REPO_NAME: directus-backend
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo Starting install phase...
+
+  pre_build:
+    commands:
+      - echo pre_build phase...
+      - aws s3 cp $SECRET_BUCKET/$IMAGE_REPO_NAME/$ENVIRONMENT/ . --recursive --region $AWS_DEFAULT_REGION
+      - npm i
+
+  build:
+    commands:
+      - echo Python Build started on `date`
+      - npx directus $CUSTOM_MANAGE_COMMAND
+
+  post_build:
+    commands:
+      - echo Build completed on `date`

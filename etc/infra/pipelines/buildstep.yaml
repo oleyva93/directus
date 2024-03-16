@@ -1,0 +1,62 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    AWS_DEFAULT_REGION: us-east-1
+    IMAGE_REPO_NAME: directus-backend
+    AWS_ACCOUNT_ID: 301907805878
+    DOCKERFILE_PATH: etc/docker/Dockerfile
+    SECRET_BUCKET: s3://secrets-healthspan
+    ACCOUNT_ID_DEV: 301907805878
+    ACCOUNT_ID_PROD: 454745569753
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo Starting install phase...
+      - apt-get update
+      - apt-get install jq
+
+  pre_build:
+    commands:
+      - echo pre_build phase...    
+  build:
+    commands:
+      - echo Docker Build started on `date`
+      - aws s3 cp $SECRET_BUCKET/$IMAGE_REPO_NAME/$ENVIRONMENT/ etc/infra/ --recursive --region $AWS_DEFAULT_REGION
+      - aws s3 cp $SECRET_BUCKET/$IMAGE_REPO_NAME/$ENVIRONMENT/.env . --region $AWS_DEFAULT_REGION
+      - |
+        if  [ "$ENVIRONMENT" == "dev" ]; then
+            AWS_ACCOUNT_ID=$ACCOUNT_ID_DEV;
+        else [ "$ENVIRONMENT" == "prod" ]; 
+            AWS_ACCOUNT_ID=$ACCOUNT_ID_PROD;
+            aws sts assume-role --role-arn arn:aws:iam::$AWS_ACCOUNT_ID:role/$ENVIRONMENT-account-cross-access --role-session-name cross-access > credentials.json
+            accesskey=$(jq '.Credentials.AccessKeyId' credentials.json | sed -e 's/^"//' -e 's/"$//')
+            secretkey=$(jq '.Credentials.SecretAccessKey' credentials.json | sed -e 's/^"//' -e 's/"$//')
+            sessiontoken=$(jq '.Credentials.SessionToken' credentials.json | sed -e 's/^"//' -e 's/"$//')
+            export AWS_ACCESS_KEY_ID=$accesskey
+            export AWS_SECRET_ACCESS_KEY=$secretkey
+            export AWS_SESSION_TOKEN=$sessiontoken
+        fi   
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - aws ecr batch-get-image --registry-id $AWS_ACCOUNT_ID --repository-name $IMAGE_REPO_NAME --image-ids imageTag=$GIT_COMMIT > image_result.json
+      - RESULT=$(jq '.failures | length' image_result.json) && rm image_result.json
+      - echo $RESULT
+      - |
+        if   true; then
+          docker build -t $IMAGE_REPO_NAME -f $DOCKERFILE_PATH .
+          docker tag $IMAGE_REPO_NAME $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$GIT_COMMIT
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$GIT_COMMIT
+        fi
+      - ls
+      - aws ecr describe-images --registry-id $AWS_ACCOUNT_ID --repository-name $IMAGE_REPO_NAME --image-ids imageTag=$GIT_COMMIT > temp.json
+      - TAG2=$(jq '.imageDetails[0].imageTags' temp.json)
+      - rm temp.json
+      - echo $TAG2
+      
+  post_build:
+    commands:
+      - echo Build completed on `date`
